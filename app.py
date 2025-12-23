@@ -109,14 +109,15 @@ def _amazon_price(query):
 def _flipkart_price(query):
     """Fetch first Flipkart result via public scraper API."""
     try:
-        # public scraper: https://dvishal485.github.io/flipkart-scraper-api/
-        resp = requests.get(
-            f"https://flipkart-scraper-api.vercel.app/search/{query}",
-            timeout=10,
-        )
+        url = f"https://flipkart-scraper-api.vercel.app/search/{query}"
+        print("Flipkart request =>", url)
+        resp = requests.get(url, timeout=10)
         data = resp.json()
+        print("Flipkart raw:", data)
+
         results = data.get("result") or data.get("results") or []
         if not results:
+            print("Flipkart: no results for", query)
             return None
 
         item = results[0]
@@ -132,6 +133,7 @@ def _flipkart_price(query):
     except Exception as e:
         print("Flipkart price error:", e)
         return None
+
 
 # ---- REAL PRICES API ----
 
