@@ -1,4 +1,6 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+import os
+import requests
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
@@ -6,6 +8,8 @@ app.secret_key = "change-this-secret-key"
 
 # simple in-memory "database"
 users = {}  # {"email": {"password_hash": "..."}}
+
+# ---- AUTH + PAGES ----
 
 @app.route("/")
 def home():
@@ -52,34 +56,111 @@ def logout():
     flash("Logged out.")
     return redirect(url_for("home"))
 
-# existing demo prices api
+# ---- PRICE HELPERS ----
+
+RAINFOREST_API_KEY = os.getenv("RAINFOREST_API_KEY")  # set in Render dashboard
+
+def _parse_price(value):
+    """Convert '₹50,000' or similar to int 50000."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not value:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits) if digits else None
+
+def _amazon_price(query):
+    """Fetch first Amazon.in result via Rainforest API."""
+    if not RAINFOREST_API_KEY:
+        return None
+
+    try:
+        resp = requests.get(
+            "https://api.rainforestapi.com/request",
+            params={
+                "api_key": RAINFOREST_API_KEY,
+                "type": "search",
+                "amazon_domain": "amazon.in",
+                "search_term": query,
+                "sort_by": "featured"
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        results = data.get("search_results") or []
+        if not results:
+            return None
+
+        item = results[0]
+        price_obj = item.get("price") or {}
+        price = _parse_price(price_obj.get("raw") or price_obj.get("value"))
+
+        return {
+            "store": "Amazon",
+            "price": price,
+            "shipping": "See on Amazon",
+            "status": "In Stock",
+            "url": item.get("link") or "https://www.amazon.in",
+        }
+    except Exception as e:
+        print("Amazon price error:", e)
+        return None
+
+def _flipkart_price(query):
+    """Fetch first Flipkart result via public scraper API."""
+    try:
+        # public scraper: https://dvishal485.github.io/flipkart-scraper-api/
+        resp = requests.get(
+            f"https://flipkart-scraper-api.vercel.app/search/{query}",
+            timeout=10,
+        )
+        data = resp.json()
+        results = data.get("result") or data.get("results") or []
+        if not results:
+            return None
+
+        item = results[0]
+        price = _parse_price(item.get("current_price") or item.get("price"))
+
+        return {
+            "store": "Flipkart",
+            "price": price,
+            "shipping": "See on Flipkart",
+            "status": "In Stock",
+            "url": item.get("link") or item.get("query_url") or "https://www.flipkart.com",
+        }
+    except Exception as e:
+        print("Flipkart price error:", e)
+        return None
+
+# ---- REAL PRICES API ----
+
 @app.route("/api/prices")
 def api_prices():
-    query = request.args.get("query", "").strip()
+    query = (request.args.get("query") or "").strip()
     if not query:
-        return {"error": "query required"}, 400
+        return jsonify({"error": "query required", "prices": []}), 400
 
-    base_price = 50000
-    prices = [
-        {
-            "store": "Flipkart",
-            "price": base_price,
-            "shipping": "Free",
-            "status": "In Stock",
-            "url": f"https://www.flipkart.com/search?q={query}"
-        },
-        {
-            "store": "Amazon",
-            "price": base_price + 2000,
-            "shipping": "Free",
-            "status": "In Stock",
-            "url": f"https://www.amazon.in/s?k={query}"
-        }
-    ]
-    min_price = min(p["price"] for p in prices)
-    for p in prices:
-        p["best"] = (p["price"] == min_price)
-    return {"query": query, "prices": prices}
+    # get data from both sources
+    flipkart = _flipkart_price(query)
+    amazon = _amazon_price(query)
+
+    items = [p for p in [flipkart, amazon] if p]
+
+    if not items:
+        return jsonify({"query": query, "prices": []})
+
+    # mark best (cheapest) price
+    valid = [p for p in items if p.get("price") is not None]
+    if valid:
+        best_price = min(p["price"] for p in valid)
+        for p in items:
+            p["best"] = p.get("price") == best_price
+    else:
+        for p in items:
+            p["best"] = False
+
+    return jsonify({"query": query, "prices": items})
 
 if __name__ == "__main__":
     app.run(debug=True)
